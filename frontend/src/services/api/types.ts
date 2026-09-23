@@ -43,6 +43,12 @@ export const SocketEvents = {
   MESSAGE_RECEIVED: 'message_received',
   QUEUE_STATUS: 'queue_status',
   ERROR: 'error',
+
+  // Session Continuity & Reconnection
+  PEER_RECONNECTING: 'peer_reconnecting',
+  PEER_RECONNECTED: 'peer_reconnected',
+  MATCH_RECONNECTED: 'match_reconnected',
+  SESSION_EXPIRED: 'session_expired',
 } as const;
 
 // ── Types ───────────────────────────────────────────────────────────────────

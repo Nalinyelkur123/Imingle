@@ -3,6 +3,7 @@
 // ============================================================================
 
 import { io, Socket } from "socket.io-client";
+import { getStoredSessionToken } from "./session";
 
 const WS_URL =
   process.env.NEXT_PUBLIC_WS_URL ||
@@ -16,21 +17,32 @@ const WS_URL =
 
 let socketInstance: Socket | null = null;
 
-export function getSocket(): Socket {
+export function getSocket(explicitToken?: string): Socket {
+  const token = explicitToken || getStoredSessionToken();
+
   if (!socketInstance) {
     socketInstance = io(WS_URL, {
       autoConnect: false,
       reconnection: true,
-      reconnectionAttempts: 10,
+      reconnectionAttempts: 15,
       reconnectionDelay: 1000,
       transports: ["websocket", "polling"],
+      auth: (cb) => {
+        const currentToken = explicitToken || getStoredSessionToken();
+        cb({ sessionToken: currentToken || undefined });
+      },
     });
+  } else if (token) {
+    socketInstance.auth = { sessionToken: token };
   }
   return socketInstance;
 }
 
-export function connectSocket(): Socket {
-  const socket = getSocket();
+export function connectSocket(token?: string): Socket {
+  const socket = getSocket(token);
+  if (token) {
+    socket.auth = { sessionToken: token };
+  }
   if (!socket.connected) {
     socket.connect();
   }
@@ -42,3 +54,4 @@ export function disconnectSocket(): void {
     socketInstance.disconnect();
   }
 }
+

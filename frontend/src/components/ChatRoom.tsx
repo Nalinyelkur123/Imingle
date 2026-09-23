@@ -16,6 +16,10 @@ import {
   submitReportApi,
 } from "@/services/api";
 import { connectSocket } from "@/services/socket";
+import {
+  initAnonymousSession,
+  AnonymousSession,
+} from "@/services/session";
 
 interface Message {
   id: string;
@@ -57,6 +61,11 @@ export function ChatRoom({ initialMode = "video" }: ChatRoomProps) {
   );
   const [reportSubmitted, setReportSubmitted] = useState(false);
   const [matchDuration, setMatchDuration] = useState(0);
+
+  // Anonymous session continuity & reconnection states
+  const [session, setSession] = useState<AnonymousSession | null>(null);
+  const [peerReconnecting, setPeerReconnecting] = useState(false);
+  const [graceRemaining, setGraceRemaining] = useState<number>(0);
 
   // Local media controls & status
   const [isAudioMuted, setIsAudioMuted] = useState(false);
@@ -268,9 +277,142 @@ export function ChatRoom({ initialMode = "video" }: ChatRoomProps) {
     setMatchDuration(0);
   }, [stopConfirm, chatState, cleanupPeerConnection]);
 
-  // Handle Socket.IO events
+  // 1. Initialize privacy-safe anonymous session on component mount
+  useEffect(() => {
+    let unmounted = false;
+
+    initAnonymousSession(mode).then((sess) => {
+      if (unmounted) return;
+      if (sess) {
+        setSession(sess);
+        connectSocket(sess.sessionToken);
+      } else {
+        connectSocket();
+      }
+    });
+
+    return () => {
+      unmounted = true;
+    };
+  }, [mode]);
+
+  // 2. Countdown timer for peer reconnection grace period (15s)
+  useEffect(() => {
+    if (!peerReconnecting || graceRemaining <= 0) return;
+    const timer = setInterval(() => {
+      setGraceRemaining((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [peerReconnecting, graceRemaining]);
+
+  // 3. Handle Socket.IO events (including session continuity & graceful reconnect)
   useEffect(() => {
     const socket = connectSocket();
+
+    const handleSessionEstablished = (payload: { sessionId: string; sessionToken: string }) => {
+      setSession((prev) => ({
+        sessionId: payload.sessionId,
+        sessionToken: payload.sessionToken,
+        status: prev?.status || "idle",
+        expiresAt: prev?.expiresAt || Date.now() + 7200000,
+      }));
+    };
+
+    const handlePeerReconnecting = (payload?: { graceSeconds?: number }) => {
+      setPeerReconnecting(true);
+      setGraceRemaining(payload?.graceSeconds || 15);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createUniqueId("sys"),
+          sender: "system",
+          text: "Partner connection interrupted. Waiting up to 15s for reconnection...",
+          time: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ]);
+    };
+
+    const handlePeerReconnected = () => {
+      setPeerReconnecting(false);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createUniqueId("sys"),
+          sender: "system",
+          text: "Partner reconnected!",
+          time: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ]);
+    };
+
+    const handleMatchReconnected = (payload: {
+      matchId: string;
+      partnerId: string;
+      isInitiator: boolean;
+      sharedInterest: string | null;
+    }) => {
+      setPeerReconnecting(false);
+      const matchInfo: MatchInfo = {
+        matchId: payload.matchId,
+        partnerId: payload.partnerId,
+        isInitiator: payload.isInitiator,
+      };
+
+      setCurrentMatch(matchInfo);
+      setSharedInterest(payload.sharedInterest);
+      setChatState(ChatState.CONNECTED);
+      setMatchDuration(0);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createUniqueId("sys"),
+          sender: "system",
+          text: "Reconnected to active session!",
+          time: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ]);
+
+      if (mode === "video") {
+        setupPeerConnection(payload.isInitiator);
+      }
+    };
+
+    const handleSessionExpired = () => {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: createUniqueId("sys"),
+          sender: "system",
+          text: "Anonymous session expired. Refreshing anonymous session...",
+          time: new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+          }),
+        },
+      ]);
+      initAnonymousSession(mode).then((newSess) => {
+        if (newSess) {
+          setSession(newSess);
+          connectSocket(newSess.sessionToken);
+        }
+      });
+    };
 
     const handleMatchFound = (payload: {
       matchId: string;
@@ -278,6 +420,7 @@ export function ChatRoom({ initialMode = "video" }: ChatRoomProps) {
       isInitiator: boolean;
       sharedInterest: string | null;
     }) => {
+      setPeerReconnecting(false);
       const matchInfo: MatchInfo = {
         matchId: payload.matchId,
         partnerId: payload.partnerId,
@@ -372,6 +515,7 @@ export function ChatRoom({ initialMode = "video" }: ChatRoomProps) {
     const handleMatchEnded = (payload?: MatchEndedPayload) => {
       cleanupPeerConnection();
       setCurrentMatch(null);
+      setPeerReconnecting(false);
       setChatState(ChatState.ENDED);
       const reasonMsg =
         payload?.reason === "reported"
@@ -392,6 +536,11 @@ export function ChatRoom({ initialMode = "video" }: ChatRoomProps) {
       ]);
     };
 
+    socket.on("session_established", handleSessionEstablished);
+    socket.on(SocketEvents.PEER_RECONNECTING, handlePeerReconnecting);
+    socket.on(SocketEvents.PEER_RECONNECTED, handlePeerReconnected);
+    socket.on(SocketEvents.MATCH_RECONNECTED, handleMatchReconnected);
+    socket.on(SocketEvents.SESSION_EXPIRED, handleSessionExpired);
     socket.on(SocketEvents.MATCH_FOUND, handleMatchFound);
     socket.on(SocketEvents.MESSAGE_RECEIVED, handleMessageReceived);
     socket.on(SocketEvents.WEBRTC_OFFER, handleWebRTCOffer);
@@ -401,6 +550,11 @@ export function ChatRoom({ initialMode = "video" }: ChatRoomProps) {
     socket.on(SocketEvents.PARTNER_DISCONNECTED, handleMatchEnded);
 
     return () => {
+      socket.off("session_established", handleSessionEstablished);
+      socket.off(SocketEvents.PEER_RECONNECTING, handlePeerReconnecting);
+      socket.off(SocketEvents.PEER_RECONNECTED, handlePeerReconnected);
+      socket.off(SocketEvents.MATCH_RECONNECTED, handleMatchReconnected);
+      socket.off(SocketEvents.SESSION_EXPIRED, handleSessionExpired);
       socket.off(SocketEvents.MATCH_FOUND, handleMatchFound);
       socket.off(SocketEvents.MESSAGE_RECEIVED, handleMessageReceived);
       socket.off(SocketEvents.WEBRTC_OFFER, handleWebRTCOffer);
@@ -560,6 +714,20 @@ export function ChatRoom({ initialMode = "video" }: ChatRoomProps) {
                   ref={remoteVideoContainerRef}
                   className="relative w-full h-full min-h-0 md:flex-1 overflow-hidden rounded-2xl border border-gray-200/70 dark:border-white/10 bg-[#161522] flex items-center justify-center shadow-sm select-none"
                 >
+                  {/* Stranger Reconnecting Grace Period Overlay */}
+                  {peerReconnecting && (
+                    <div className="absolute top-2.5 inset-x-2.5 sm:top-3 sm:inset-x-3 z-30 flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-amber-600/95 text-white text-xs font-semibold backdrop-blur-md shadow-lg border border-amber-400/40 animate-pulse">
+                      <div className="flex items-center gap-2">
+                        <svg className="animate-spin h-3.5 w-3.5 shrink-0" viewBox="0 0 24 24" fill="none">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z" />
+                        </svg>
+                        <span>Stranger reconnecting... ({graceRemaining}s)</span>
+                      </div>
+                      <span className="text-[10px] bg-black/25 px-2 py-0.5 rounded-full font-mono shrink-0">15s Grace</span>
+                    </div>
+                  )}
+
                   {/* Real WebRTC Remote Video Stream */}
                   <video
                     ref={remoteVideoRef}
@@ -909,16 +1077,34 @@ export function ChatRoom({ initialMode = "video" }: ChatRoomProps) {
                 )}
               </div>
 
-              {/* Interests Quick-Tag Pill */}
-              <button
-                type="button"
-                onClick={() => setShowInterestsModal(true)}
-                className="flex items-center gap-1.5 rounded-full border border-gray-200/90 dark:border-white/10 bg-white dark:bg-[#161522] px-2.5 py-1 text-[11px] font-semibold text-gray-700 dark:text-gray-300 hover:border-[#673ddc] hover:text-[#673ddc] transition-colors cursor-pointer shadow-2xs"
-              >
-                <span>🏷️</span>
-                <span>{interests.length > 0 ? `${interests.length} Interests` : "Add Interests"}</span>
-                <span className="text-[10px] text-gray-400">✏️</span>
-              </button>
+              <div className="flex items-center gap-1.5 sm:gap-2">
+                {/* Safe Anonymous Session Badge */}
+                <div
+                  className="hidden sm:inline-flex items-center gap-1.5 rounded-full border border-gray-200/90 dark:border-white/10 bg-gray-50 dark:bg-[#161522] px-2.5 py-1 text-[11px] font-medium text-gray-600 dark:text-gray-400 select-none shadow-2xs"
+                  title="Privacy-safe anonymous session. Zero biometrics or personal tracking."
+                >
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  <span>
+                    Session:{" "}
+                    <span className="font-mono text-[10px] text-gray-800 dark:text-gray-200">
+                      {session?.sessionId
+                        ? `${session.sessionId.replace("sess_", "").substring(0, 8)}...`
+                        : "Connecting"}
+                    </span>
+                  </span>
+                </div>
+
+                {/* Interests Quick-Tag Pill */}
+                <button
+                  type="button"
+                  onClick={() => setShowInterestsModal(true)}
+                  className="flex items-center gap-1.5 rounded-full border border-gray-200/90 dark:border-white/10 bg-white dark:bg-[#161522] px-2.5 py-1 text-[11px] font-semibold text-gray-700 dark:text-gray-300 hover:border-[#673ddc] hover:text-[#673ddc] transition-colors cursor-pointer shadow-2xs"
+                >
+                  <span>🏷️</span>
+                  <span>{interests.length > 0 ? `${interests.length} Interests` : "Add Interests"}</span>
+                  <span className="text-[10px] text-gray-400">✏️</span>
+                </button>
+              </div>
             </div>
 
             {/* Main Content Pane (Welcome Rules Card OR Live Chat Messages) */}

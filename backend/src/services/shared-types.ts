@@ -5,6 +5,8 @@
 // The frontend imports a copy of these types from its own services/api folder.
 // ============================================================================
 
+export type ChatMode = 'video' | 'text';
+
 // ── Client → Server Events ──────────────────────────────────────────────────
 export const JOIN_QUEUE = 'join_queue' as const;
 export const LEAVE_QUEUE = 'leave_queue' as const;

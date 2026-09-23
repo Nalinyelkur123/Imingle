@@ -20,6 +20,7 @@ import { errorHandler } from './middleware/errorHandler.js';
 import routes from './routes/index.js';
 import { logger } from './utils/logger.js';
 import { initSocketService } from './services/socket.service.js';
+import { sessionService } from './services/session.service.js';
 
 // ── Create Express app ──────────────────────────────────────────────────────
 const app = express();
@@ -27,7 +28,12 @@ const app = express();
 // ── Create HTTP server (shared with Socket.IO) ──────────────────────────────
 const httpServer = createServer(app);
 
-// ── Initialize Socket.IO ────────────────────────────────────────────────────
+// ── Initialize Services ─────────────────────────────────────────────────────
+sessionService.init().catch((err) => {
+  logger.error('Failed to initialize session store:', {
+    error: err instanceof Error ? err.message : String(err),
+  });
+});
 initSocketService(httpServer);
 
 // ── Middleware chain ────────────────────────────────────────────────────────

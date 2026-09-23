@@ -1,8 +1,8 @@
 // ============================================================================
-// NexusChat — Socket.IO Real-Time Service
+// NexusChat — Socket.IO Real-Time Service with Session Continuity
 // ============================================================================
-// Manages real-time WebSocket communication, matchmaking lifecycles,
-// WebRTC signaling relay, and chat messaging.
+// Manages authenticated WebSocket communication, matchmaking lifecycles,
+// WebRTC signaling relay, chat messaging, and reconnection grace periods.
 // ============================================================================
 
 import { Server as HttpServer } from 'http';
@@ -10,6 +10,7 @@ import { Server as SocketIOServer, Socket } from 'socket.io';
 import { corsOptions } from '../config/cors.js';
 import { logger } from '../utils/logger.js';
 import { matchmaker, ChatMode } from './matchmaker.service.js';
+import { sessionService } from './session.service.js';
 import {
   ClientEvents,
   ServerEvents,
@@ -34,15 +35,80 @@ export function initSocketService(httpServer: HttpServer): SocketIOServer {
 
   ioInstance = io;
 
+  // ── Authentication Middleware ─────────────────────────────────────────────
+  // Validates cryptographically signed sessionToken during handshake, or auto-provisions
+  // an anonymous session to prevent connection drops.
+  io.use(async (socket, next) => {
+    let token =
+      socket.handshake.auth?.sessionToken ||
+      socket.handshake.auth?.token ||
+      (socket.handshake.headers?.authorization?.startsWith('Bearer ')
+        ? socket.handshake.headers.authorization.substring(7).trim()
+        : null);
+
+    if (!token && socket.handshake.headers?.cookie) {
+      const match = socket.handshake.headers.cookie.match(/umingle_session=([^;]+)/);
+      if (match) {
+        token = decodeURIComponent(match[1]);
+      }
+    }
+
+    let verified = sessionService.verifyToken(token);
+
+    if (!verified) {
+      try {
+        const freshSession = await sessionService.createOrResumeSession(null, 'video');
+        token = freshSession.token;
+        verified = { sessionId: freshSession.sessionId, expiresAt: freshSession.expiresAt };
+        logger.info(`Auto-provisioned anonymous session ${freshSession.sessionId} for socket ${socket.id}`);
+      } catch (err) {
+        logger.error('Failed to auto-provision anonymous session on socket handshake', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return next(new Error('AUTHENTICATION_ERROR: Valid anonymous session token required'));
+      }
+    }
+
+    socket.data.sessionId = verified.sessionId;
+    socket.data.sessionToken = token;
+    next();
+  });
+
   const broadcastOnlineCount = () => {
     const stats = matchmaker.getStats();
     io.emit('online_count', { count: stats.onlineUsers });
   };
 
   io.on('connection', (socket: Socket) => {
-    matchmaker.onSocketConnected();
-    logger.info(`Socket connected: ${socket.id}`);
+    const sessionId = socket.data.sessionId as string;
+    const sessionToken = socket.data.sessionToken as string;
+    matchmaker.onSocketConnected(socket.id, sessionId);
+    logger.info(`Socket connected: ${socket.id} (Session: ${sessionId})`);
     broadcastOnlineCount();
+
+    // Inform client of active session identity
+    socket.emit('session_established', {
+      sessionId,
+      sessionToken,
+    });
+
+    // ── CHECK RECONNECTION TO ACTIVE MATCH ──────────────────────────────────
+    const reconnectResult = matchmaker.handleReconnect(sessionId, socket.id);
+    if (reconnectResult.resumed && reconnectResult.match && reconnectResult.partnerSocketId) {
+      logger.info(`Session ${sessionId} re-established match ${reconnectResult.match.matchId}`);
+
+      socket.emit('match_reconnected', {
+        matchId: reconnectResult.match.matchId,
+        partnerId: reconnectResult.partnerSocketId,
+        isInitiator: reconnectResult.isInitiator,
+        sharedInterest: reconnectResult.match.sharedInterest,
+      });
+
+      io.to(reconnectResult.partnerSocketId).emit('peer_reconnected', {
+        matchId: reconnectResult.match.matchId,
+        partnerId: socket.id,
+      });
+    }
 
     // ── JOIN QUEUE ──────────────────────────────────────────────────────────
     socket.on(
@@ -53,22 +119,22 @@ export function initSocketService(httpServer: HttpServer): SocketIOServer {
           ? payload.interests
           : [];
 
-        logger.info(`Socket ${socket.id} joining queue for mode: ${mode}`);
+        logger.info(`Session ${sessionId} (Socket ${socket.id}) joining queue for mode: ${mode}`);
 
-        const result = matchmaker.joinQueue(socket.id, mode, interests);
+        const result = matchmaker.joinQueue(sessionId, socket.id, mode, interests);
 
         if (result.matched && result.match && result.partnerSocketId) {
           const partnerSocket = io.sockets.sockets.get(result.partnerSocketId);
 
           if (!partnerSocket) {
             // Partner dropped before pairing was finalized
-            matchmaker.endMatch(result.match.matchId);
-            matchmaker.joinQueue(socket.id, mode, interests);
+            matchmaker.endMatch(result.match.matchId, 'partner_missing');
+            matchmaker.joinQueue(sessionId, socket.id, mode, interests);
             return;
           }
 
           logger.info(
-            `Match formed: ${result.match.matchId} between ${socket.id} and ${result.partnerSocketId}`
+            `Match formed: ${result.match.matchId} between ${sessionId} (${socket.id}) and ${result.partnerSessionId} (${result.partnerSocketId})`
           );
 
           // Emit MATCH_FOUND to initiating peer (socket)
@@ -92,7 +158,7 @@ export function initSocketService(httpServer: HttpServer): SocketIOServer {
 
     // ── LEAVE QUEUE ─────────────────────────────────────────────────────────
     socket.on(ClientEvents.LEAVE_QUEUE, () => {
-      matchmaker.leaveQueue(socket.id);
+      matchmaker.leaveQueue(sessionId);
     });
 
     // ── SEND MESSAGE ────────────────────────────────────────────────────────
@@ -159,7 +225,7 @@ export function initSocketService(httpServer: HttpServer): SocketIOServer {
       const match = matchmaker.getMatchBySocket(socket.id);
 
       if (match) {
-        matchmaker.endMatch(match.matchId);
+        matchmaker.endMatch(match.matchId, 'next_stranger');
       }
 
       if (partnerSocketId) {
@@ -171,12 +237,12 @@ export function initSocketService(httpServer: HttpServer): SocketIOServer {
 
     // ── STOP ────────────────────────────────────────────────────────────────
     socket.on(ClientEvents.STOP, () => {
-      matchmaker.leaveQueue(socket.id);
+      matchmaker.leaveQueue(sessionId);
       const partnerSocketId = matchmaker.getPartnerSocketId(socket.id);
       const match = matchmaker.getMatchBySocket(socket.id);
 
       if (match) {
-        matchmaker.endMatch(match.matchId);
+        matchmaker.endMatch(match.matchId, 'user_stop');
       }
 
       if (partnerSocketId) {
@@ -191,13 +257,13 @@ export function initSocketService(httpServer: HttpServer): SocketIOServer {
       const partnerSocketId = matchmaker.getPartnerSocketId(socket.id);
       const match = matchmaker.getMatchBySocket(socket.id);
 
-      logger.warn(`User ${socket.id} reported partner ${partnerSocketId}`, {
+      logger.warn(`Session ${sessionId} reported partner socket ${partnerSocketId}`, {
         reason: payload?.reason,
         description: payload?.description,
       });
 
       if (match) {
-        matchmaker.endMatch(match.matchId);
+        matchmaker.endMatch(match.matchId, 'reported');
       }
 
       if (partnerSocketId) {
@@ -209,13 +275,22 @@ export function initSocketService(httpServer: HttpServer): SocketIOServer {
 
     // ── DISCONNECT ──────────────────────────────────────────────────────────
     socket.on('disconnect', () => {
-      logger.info(`Socket disconnected: ${socket.id}`);
-      const cleanup = matchmaker.onSocketDisconnected(socket.id);
+      logger.info(`Socket disconnected: ${socket.id} (Session: ${sessionId})`);
 
-      if (cleanup.partnerSocketId) {
-        io.to(cleanup.partnerSocketId).emit(ServerEvents.PARTNER_DISCONNECTED, {});
-        io.to(cleanup.partnerSocketId).emit(ServerEvents.MATCH_ENDED, {
-          reason: MatchEndReason.PARTNER_DISCONNECTED,
+      const cleanup = matchmaker.onSocketDisconnected(socket.id, (_expiredMatch, expiredPartnerSocketId) => {
+        // Callback fired if 15s grace period expires without user reconnecting
+        if (expiredPartnerSocketId) {
+          io.to(expiredPartnerSocketId).emit(ServerEvents.PARTNER_DISCONNECTED, {});
+          io.to(expiredPartnerSocketId).emit(ServerEvents.MATCH_ENDED, {
+            reason: MatchEndReason.PARTNER_DISCONNECTED,
+          });
+        }
+      });
+
+      // If in active match, notify partner of temporary connection drop
+      if (cleanup.matchPaused && cleanup.partnerSocketId) {
+        io.to(cleanup.partnerSocketId).emit('peer_reconnecting', {
+          graceSeconds: cleanup.graceSeconds,
         });
       }
 
