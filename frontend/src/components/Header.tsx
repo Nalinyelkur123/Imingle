@@ -83,7 +83,7 @@ export function Header() {
   };
 
   return (
-    <header className="shrink-0 h-[60px] sm:h-[68px] relative z-50 flex w-full items-center justify-between px-3 sm:px-6 lg:px-8">
+    <header className="shrink-0 h-[60px] sm:h-[68px] relative z-50 flex w-full items-center justify-between px-4 sm:px-6 lg:px-8 max-w-7xl mx-auto">
       {/* Umingle Logo */}
       <Link href="/" className="noSelect flex items-center gap-2 sm:gap-2.5" id="umingle-logo-link">
         {/* Rounded Purple Icon */}
