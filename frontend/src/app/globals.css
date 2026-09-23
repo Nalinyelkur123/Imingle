@@ -1,0 +1,168 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark-mode, .dark-mode *));
+
+:root {
+  --um-bg: #ffffff;
+  --um-surface-1: #ffffff;
+  --um-surface-2: #f7f6ff;
+  --um-surface-3: #f0edff;
+  --um-border: #e8e8ed;
+  --um-border-strong: #d4d4db;
+  --um-text: #18181b;
+  --um-text-muted: #6b7280;
+  --um-text-secondary: #5b34c9;
+  --um-accent: #673ddc;
+  --um-accent-gradient: linear-gradient(135deg, #673ddc, #7a4dff);
+  --um-accent-hover: #5b34c9;
+  --um-accent-soft: #f4f0ff;
+  --um-online-dot: #22c55e;
+  --um-logo-text: #18181b;
+  --header-height: 70px;
+}
+
+html.dark-mode {
+  --um-bg: #0e0d14;
+  --um-surface-1: #161520;
+  --um-surface-2: #1e1d2c;
+  --um-surface-3: #262438;
+  --um-border: #29273c;
+  --um-border-strong: #383552;
+  --um-text: #f3f4f6;
+  --um-text-muted: #9ca3af;
+  --um-text-secondary: #a78bfa;
+  --um-accent: #7c3aed;
+  --um-accent-gradient: linear-gradient(135deg, #6d28d9, #7c3aed);
+  --um-accent-hover: #6d28d9;
+  --um-accent-soft: #231b40;
+  --um-online-dot: #22c55e;
+  --um-logo-text: #ffffff;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html {
+  width: 100%;
+  min-height: 100%;
+  background-color: var(--um-bg);
+}
+
+body {
+  width: 100%;
+  min-height: 100vh;
+  min-height: 100dvh;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-inter), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background-color: var(--um-bg);
+  color: var(--um-text);
+  overflow-x: hidden;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* Ambient organic blob in top-right */
+.ambient-blob-tr {
+  position: fixed;
+  top: 0;
+  right: 0;
+  width: min(380px, 35vw);
+  height: min(380px, 35vw);
+  background-color: #ded4fb;
+  border-bottom-left-radius: 80% 70%;
+  border-top-left-radius: 25% 45%;
+  pointer-events: none;
+  z-index: 0;
+  opacity: 0.7;
+}
+
+html.dark-mode .ambient-blob-tr {
+  background-color: #231942;
+  opacity: 0.5;
+}
+
+.noSelect {
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+/* Header */
+header {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  top: 0;
+  z-index: 50;
+  position: sticky;
+}
+
+/* Choice Buttons */
+.choiceButton {
+  width: 145px;
+  height: 58px;
+  border-radius: 12px;
+  background: var(--um-accent);
+  color: #ffffff !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+  font-size: 24px;
+  font-weight: 700;
+  border: 2px solid transparent;
+  box-shadow: 0 4px 14px rgba(103, 61, 220, 0.28);
+  transition: transform 0.12s ease, filter 0.15s ease, box-shadow 0.15s ease;
+  cursor: pointer;
+}
+
+.choiceButton:hover {
+  filter: brightness(1.08);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 18px rgba(103, 61, 220, 0.38);
+}
+
+.choiceButton:active {
+  transform: scale(0.97) translateY(0);
+  box-shadow: 0 2px 6px rgba(103, 61, 220, 0.2);
+}
+
+.choiceButton--secondary {
+  background: var(--um-surface-1) !important;
+  color: var(--um-accent) !important;
+  border: 2px solid var(--um-accent);
+  box-shadow: 0 2px 8px rgba(103, 61, 220, 0.08);
+}
+
+.choiceButton--secondary:hover {
+  filter: none;
+  background: var(--um-accent-soft) !important;
+  box-shadow: 0 4px 12px rgba(103, 61, 220, 0.15);
+}
+
+html.dark-mode .choiceButton--secondary {
+  background: transparent !important;
+  color: var(--um-accent) !important;
+  border-color: #7c3aed;
+}
+
+html.dark-mode .choiceButton--secondary:hover {
+  background: rgba(124, 58, 237, 0.12) !important;
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 7px;
+  height: 7px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--um-border-strong);
+  border-radius: 4px;
+}
